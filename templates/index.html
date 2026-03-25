@@ -332,6 +332,65 @@
             border-color: rgba(102,126,234,0.6);
         }
 
+        /* Аватары: если изображения нет, показываем круг с градиентом как у кнопок */
+        .avatar-wrap {
+            width: 56px;
+            height: 56px;
+            border-radius: 50%;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            overflow: hidden;
+            margin-bottom: 10px;
+            flex: 0 0 auto;
+        }
+
+        .avatar-wrap.small {
+            width: 34px;
+            height: 34px;
+            margin-bottom: 0;
+        }
+
+        .avatar-initials {
+            color: #fff;
+            font-weight: 800;
+            font-size: 18px;
+            line-height: 1;
+            user-select: none;
+        }
+
+        .avatar-img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            display: none;
+        }
+
+        .avatar-img.show {
+            display: block;
+        }
+
+        /* Красивый выбор файла */
+        .file-picker {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            cursor: pointer;
+            user-select: none;
+            padding: 10px 14px;
+            border-radius: 10px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: #fff;
+            font-size: 14px;
+            white-space: nowrap;
+        }
+
+        .file-picker:active { transform: scale(0.98); }
+
+        .file-input-hidden { display: none; }
+
         .attachment-img {
             max-width: 260px;
             max-height: 220px;
@@ -452,8 +511,10 @@
     <div id="chatContainer" class="chat-container flex">
         <div class="sidebar">
             <div class="user-info">
-                <img id="currentAvatar" src="" alt="avatar"
-                     style="width:56px;height:56px;border-radius:50%;object-fit:cover;display:block;margin-bottom:10px;background:#eef1f5;">
+                <div class="avatar-wrap" id="currentAvatarWrap">
+                    <img id="currentAvatar" class="avatar-img" alt="avatar" src="">
+                    <span class="avatar-initials" id="currentAvatarInitials">?</span>
+                </div>
                 <h3 id="currentNickname"></h3>
                 <p id="currentUsername"></p>
                 <button class="btn-secondary" onclick="openSettings()" style="margin-top:10px;width:100%;">Настройки</button>
@@ -473,7 +534,10 @@
             <div class="message-input-area">
                 <input type="text" id="messageInput" placeholder="Введите сообщение..." 
                        onkeypress="if(event.key === 'Enter') sendMessage()">
-                <input type="file" id="fileInput" multiple style="flex:0 0 210px;font-size:14px;">
+                <input type="file" id="fileInput" multiple class="file-input-hidden">
+                <label class="file-picker" for="fileInput" title="Можно отправить файлы вместе с сообщением">
+                    Выбрать файл(ы)
+                </label>
                 <button onclick="sendMessage()">Отправить</button>
             </div>
         </div>
@@ -511,7 +575,10 @@
 
             <div class="modal-row">
                 <div style="width:120px;font-weight:600;">Аватарка</div>
-                <input type="file" id="avatarInput" accept="image/*">
+                <input type="file" id="avatarInput" accept="image/*" class="file-input-hidden">
+                <label class="file-picker" for="avatarInput" style="width:100%;justify-content:center;">
+                    Выберите файл
+                </label>
             </div>
             <div class="modal-actions">
                 <button class="btn-primary" onclick="uploadAvatar()">Загрузить аватар</button>
@@ -623,9 +690,7 @@
                 currentUser = data;
                 document.getElementById('currentNickname').textContent = data.nickname;
                 document.getElementById('currentUsername').textContent = `@${data.username}`;
-                if (data.avatar_url) {
-                    document.getElementById('currentAvatar').src = `${data.avatar_url}?t=${Date.now()}`;
-                }
+                setAvatarForCurrentUser(data.username, data.avatar_url, data.nickname);
                 
                 // Показываем чат
                 document.getElementById('authContainer').style.display = 'none';
@@ -670,11 +735,17 @@
                     <div class="user-item ${currentChatUser === user.username ? 'active' : ''}" 
                          onclick="startChat('${user.username}')">
                         <div style="display:flex;gap:10px;align-items:center;">
-                            <img src="${user.avatar_url}" 
-                                 style="width:34px;height:34px;border-radius:50%;object-fit:cover;background:#eef1f5;"
-                                 onerror="this.style.display='none'">
-                            <strong>${user.nickname}</strong><br>
-                            <small>@${user.username}</small>
+                            <div class="avatar-wrap small">
+                                <img class="avatar-img ${user.avatar_url ? 'show' : ''}" 
+                                     src="${user.avatar_url || ''}"
+                                     alt="avatar"
+                                     onerror="this.classList.remove('show'); this.src='';">
+                                <span class="avatar-initials">${(user.nickname || user.username || '?').trim().charAt(0).toUpperCase()}</span>
+                            </div>
+                            <div>
+                                <strong>${user.nickname}</strong><br>
+                                <small>@${user.username}</small>
+                            </div>
                         </div>
                         <span class="online-status ${user.is_online ? 'online' : 'offline'}"></span>
                     </div>
@@ -856,6 +927,37 @@
         }
 
         // Настройки
+        function getInitial(nickname) {
+            if (!nickname) return '?';
+            const s = String(nickname).trim();
+            if (!s) return '?';
+            return s[0].toUpperCase();
+        }
+
+        function setAvatarForCurrentUser(username, avatarUrl, nickname) {
+            const wrap = document.getElementById('currentAvatarWrap');
+            const img = document.getElementById('currentAvatar');
+            const initials = document.getElementById('currentAvatarInitials');
+
+            const initialText = getInitial(nickname || username);
+            initials.textContent = initialText;
+
+            if (avatarUrl) {
+                img.classList.add('show');
+                img.onerror = () => {
+                    img.classList.remove('show');
+                    img.src = '';
+                    initials.style.display = 'block';
+                };
+                img.src = `${avatarUrl}?t=${Date.now()}`;
+                initials.style.display = 'none';
+            } else {
+                img.classList.remove('show');
+                img.src = '';
+                initials.style.display = 'block';
+            }
+        }
+
         function openSettings() {
             document.getElementById('settingsNickname').value = currentUser?.nickname || '';
             document.getElementById('settingsCurrentPassword').value = '';
@@ -915,9 +1017,7 @@
             });
             const data = await response.json();
             if (!data.success) return alert(data.message || 'Ошибка');
-
-            const avatarEl = document.getElementById('currentAvatar');
-            avatarEl.src = `/api/avatar/${currentUser.username}?t=${Date.now()}`;
+            setAvatarForCurrentUser(currentUser.username, `/api/avatar/${currentUser.username}`, currentUser.nickname);
             document.getElementById('avatarInput').value = '';
             closeSettings();
         }
@@ -931,9 +1031,7 @@
                 currentUser = data;
                 document.getElementById('currentNickname').textContent = data.nickname;
                 document.getElementById('currentUsername').textContent = `@${data.username}`;
-                if (data.avatar_url) {
-                    document.getElementById('currentAvatar').src = `${data.avatar_url}?t=${Date.now()}`;
-                }
+                setAvatarForCurrentUser(data.username, data.avatar_url, data.nickname);
                 document.getElementById('authContainer').style.display = 'none';
                 document.getElementById('chatContainer').style.display = 'flex';
                 document.getElementById('messageInput').disabled = true;
