@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request, jsonify, session
+from flask import Flask, render_template, request, jsonify, session, send_file, abort
 from flask_socketio import SocketIO, emit, join_room, leave_room
 import json
 import os
@@ -6,12 +6,15 @@ from datetime import datetime
 from functools import wraps
 import hashlib
 import socket
+from io import BytesIO
+from werkzeug.utils import secure_filename
 import psycopg2
 from psycopg2.extras import RealDictCursor
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'dev-secret-key-change-me')
 socketio = SocketIO(app, cors_allowed_origins="*")
+app.config['MAX_CONTENT_LENGTH'] = int(os.getenv("MAX_CONTENT_LENGTH", str(10 * 1024 * 1024)))  # 10MB по умолчанию
 
 # Файлы для хранения данных
 USERS_FILE = 'users.json'
@@ -78,9 +81,16 @@ def db_init():
                     username TEXT PRIMARY KEY,
                     password_hash TEXT NOT NULL,
                     nickname TEXT NOT NULL,
-                    created_at TIMESTAMP NOT NULL
+                    created_at TIMESTAMP NOT NULL,
+                    avatar_data BYTEA,
+                    avatar_mime TEXT,
+                    avatar_filename TEXT
                 )
             """)
+            # Для уже существующей таблицы добавляем колонки без миграций вручную
+            cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_data BYTEA")
+            cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_mime TEXT")
+            cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_filename TEXT")
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS messages (
                     id SERIAL PRIMARY KEY,
@@ -94,6 +104,26 @@ def db_init():
             cur.execute("""
                 CREATE INDEX IF NOT EXISTS idx_messages_pair
                 ON messages(from_user, to_user)
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS attachments (
+                    id SERIAL PRIMARY KEY,
+                    message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+                    file_name TEXT NOT NULL,
+                    mime_type TEXT NOT NULL,
+                    data BYTEA NOT NULL,
+                    created_at TIMESTAMP NOT NULL DEFAULT NOW()
+                )
+            """)
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_attachments_message_id ON attachments(message_id)")
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS reactions (
+                    message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+                    user_username TEXT NOT NULL REFERENCES users(username) ON DELETE CASCADE,
+                    emoji TEXT NOT NULL,
+                    created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                    PRIMARY KEY (message_id, user_username)
+                )
             """)
 
 def db_get_user(username):
@@ -168,15 +198,109 @@ def db_get_history(current_user, other_user):
 
     history = []
     for r in rows:
+        message_id = r['id']
+
+        # Вложения (файлы/картинки) и реакции под сообщением
+        with db_connect() as conn2:
+            with conn2.cursor(cursor_factory=RealDictCursor) as cur2:
+                cur2.execute(
+                    "SELECT id, file_name, mime_type FROM attachments WHERE message_id=%s ORDER BY id ASC",
+                    (message_id,),
+                )
+                atts = cur2.fetchall()
+
+                cur2.execute(
+                    "SELECT emoji, COUNT(*) AS cnt FROM reactions WHERE message_id=%s GROUP BY emoji ORDER BY emoji ASC",
+                    (message_id,),
+                )
+                reactions = cur2.fetchall()
+
+                cur2.execute(
+                    "SELECT emoji FROM reactions WHERE message_id=%s AND user_username=%s LIMIT 1",
+                    (message_id, current_user),
+                )
+                my_reaction_row = cur2.fetchone()
+
         history.append({
-            'id': r['id'],
+            'id': message_id,
             'from': r['from_user'],
             'from_nickname': r['from_nickname'],
             'to': r['to_user'],
             'message': r['message'],
             'timestamp': r['timestamp'],
+            'attachments': [
+                {
+                    'id': a['id'],
+                    'url': f"/api/attachment/{a['id']}",
+                    'file_name': a['file_name'],
+                    'mime_type': a['mime_type'],
+                }
+                for a in atts
+            ],
+            'reactions': [{'emoji': rr['emoji'], 'count': rr['cnt']} for rr in reactions],
+            'my_reaction': my_reaction_row['emoji'] if my_reaction_row else None,
         })
     return history
+
+def db_get_attachment(attachment_id):
+    with db_connect() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                "SELECT id, file_name, mime_type, data FROM attachments WHERE id=%s",
+                (attachment_id,),
+            )
+            return cur.fetchone()
+
+def db_get_message_pair(message_id):
+    with db_connect() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                "SELECT id, from_user, to_user FROM messages WHERE id=%s",
+                (message_id,),
+            )
+            return cur.fetchone()
+
+def db_insert_attachment(message_id, file_name, mime_type, data_bytes):
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO attachments (message_id, file_name, mime_type, data)
+                VALUES (%s, %s, %s, %s)
+                RETURNING id
+                """,
+                (message_id, file_name, mime_type, data_bytes),
+            )
+            attachment_id = cur.fetchone()[0]
+    return {
+        'id': attachment_id,
+        'url': f"/api/attachment/{attachment_id}",
+        'file_name': file_name,
+        'mime_type': mime_type,
+    }
+
+def db_get_reaction_payload(message_id, current_user):
+    with db_connect() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                "SELECT emoji, COUNT(*) AS cnt FROM reactions WHERE message_id=%s GROUP BY emoji ORDER BY emoji ASC",
+                (message_id,),
+            )
+            reactions = cur.fetchall()
+
+            cur.execute(
+                "SELECT emoji FROM reactions WHERE message_id=%s AND user_username=%s LIMIT 1",
+                (message_id, current_user),
+            )
+            my_reaction_row = cur.fetchone()
+
+    return {
+        'reactions': [{'emoji': r['emoji'], 'count': r['cnt']} for r in reactions],
+        'my_reaction': my_reaction_row['emoji'] if my_reaction_row else None,
+    }
+
+def chat_room_for_users(user_a, user_b):
+    return f"chat_{min(user_a, user_b)}_{max(user_a, user_b)}"
 
 # Инициализация данных
 if USE_DB:
@@ -255,7 +379,8 @@ def login():
             return jsonify({
                 'success': True,
                 'nickname': user["nickname"],
-                'username': username
+                'username': username,
+                'avatar_url': f"/api/avatar/{username}"
             })
         return jsonify({'success': False, 'message': 'Неверное имя пользователя или пароль'})
 
@@ -287,7 +412,8 @@ def check_auth():
         return jsonify({
             'authenticated': True,
             'username': session['username'],
-            'nickname': session.get('nickname')
+            'nickname': session.get('nickname'),
+            'avatar_url': f"/api/avatar/{session['username']}"
         })
     return jsonify({'authenticated': False})
 
@@ -302,7 +428,8 @@ def get_users():
             all_users.append({
                 'username': r['username'],
                 'nickname': r['nickname'],
-                'is_online': r['username'] in active_users
+                'is_online': r['username'] in active_users,
+                'avatar_url': f"/api/avatar/{r['username']}"
             })
         return jsonify(all_users)
 
@@ -311,7 +438,8 @@ def get_users():
         all_users.append({
             'username': username,
             'nickname': data['nickname'],
-            'is_online': username in active_users
+            'is_online': username in active_users,
+            'avatar_url': f"/api/avatar/{username}"
         })
     return jsonify(all_users)
 
@@ -329,6 +457,178 @@ def get_history(other_user):
            (msg['from'] == other_user and msg['to'] == current_user):
             history.append(msg)
     return jsonify(history)
+
+@app.route('/api/attachment/<int:attachment_id>')
+@login_required
+def api_attachment(attachment_id):
+    if not USE_DB:
+        abort(404)
+    row = db_get_attachment(attachment_id)
+    if not row or row.get('data') is None:
+        abort(404)
+
+    return send_file(
+        BytesIO(row['data']),
+        mimetype=row.get('mime_type') or 'application/octet-stream',
+        download_name=row.get('file_name') or f'attachment-{attachment_id}',
+        as_attachment=False,
+    )
+
+@app.route('/api/avatar/<username>')
+@login_required
+def api_avatar(username):
+    if not USE_DB:
+        abort(404)
+    with db_connect() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                "SELECT avatar_data, avatar_mime, avatar_filename FROM users WHERE username=%s",
+                (username,),
+            )
+            row = cur.fetchone()
+
+    if not row or row.get('avatar_data') is None:
+        abort(404)
+
+    return send_file(
+        BytesIO(row['avatar_data']),
+        mimetype=row.get('avatar_mime') or 'application/octet-stream',
+        download_name=row.get('avatar_filename') or f'{username}.png',
+        as_attachment=False,
+    )
+
+@app.route('/api/update_nickname', methods=['POST'])
+@login_required
+def update_nickname():
+    data = request.json or {}
+    nickname = (data.get('nickname') or '').strip()
+    if not nickname:
+        return jsonify({'success': False, 'message': 'Никнейм не может быть пустым'})
+
+    if USE_DB:
+        with db_connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE users SET nickname=%s WHERE username=%s",
+                    (nickname, session['username']),
+                )
+        session['nickname'] = nickname
+        return jsonify({'success': True})
+
+    return jsonify({'success': False, 'message': 'Недоступно без DATABASE_URL'})
+
+@app.route('/api/update_password', methods=['POST'])
+@login_required
+def update_password():
+    data = request.json or {}
+    current_password = data.get('current_password') or ''
+    new_password = data.get('new_password') or ''
+
+    if not current_password or not new_password:
+        return jsonify({'success': False, 'message': 'Заполните текущий и новый пароль'})
+
+    if USE_DB:
+        user = db_get_user(session['username'])
+        if not user or user['password_hash'] != hash_password(current_password):
+            return jsonify({'success': False, 'message': 'Текущий пароль неверный'})
+
+        new_hash = hash_password(new_password)
+        with db_connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE users SET password_hash=%s WHERE username=%s",
+                    (new_hash, session['username']),
+                )
+        return jsonify({'success': True})
+
+    return jsonify({'success': False, 'message': 'Недоступно без DATABASE_URL'})
+
+@app.route('/api/update_avatar', methods=['POST'])
+@login_required
+def update_avatar():
+    if not USE_DB:
+        return jsonify({'success': False, 'message': 'Недоступно без DATABASE_URL'}), 500
+
+    if 'avatar' not in request.files:
+        return jsonify({'success': False, 'message': 'Файл avatar не найден'}), 400
+
+    avatar = request.files['avatar']
+    if not avatar or not avatar.filename:
+        return jsonify({'success': False, 'message': 'Выберите файл'}), 400
+
+    file_bytes = avatar.read()
+    mime_type = avatar.mimetype or 'application/octet-stream'
+    filename = secure_filename(avatar.filename) or f'{session["username"]}-avatar'
+
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE users
+                SET avatar_data=%s, avatar_mime=%s, avatar_filename=%s
+                WHERE username=%s
+                """,
+                (psycopg2.Binary(file_bytes), mime_type, filename, session['username']),
+            )
+
+    return jsonify({'success': True})
+
+@app.route('/api/send_message', methods=['POST'])
+@login_required
+def api_send_message():
+    if not USE_DB:
+        return jsonify({'success': False, 'message': 'Недоступно без DATABASE_URL'}), 500
+
+    to_user = (request.form.get('to') or '').strip()
+    message_text = (request.form.get('message') or '').strip()
+    files = request.files.getlist('files')
+
+    if not to_user:
+        return jsonify({'success': False, 'message': 'Не выбран собеседник'}), 400
+
+    has_files = any(f and f.filename for f in files)
+    if (not message_text) and (not has_files):
+        return jsonify({'success': False, 'message': 'Сообщение или файлы обязательны'}), 400
+
+    ts_dt = datetime.now()
+
+    msg_data = db_insert_message(
+        from_user=session['username'],
+        from_nickname=session['nickname'],
+        to_user=to_user,
+        message=message_text if message_text else '',
+        ts_dt=ts_dt,
+    )
+
+    attachments = []
+    for f in files:
+        if not f or not f.filename:
+            continue
+        file_bytes = f.read()
+        file_name = secure_filename(f.filename) or 'file'
+        mime_type = f.mimetype or 'application/octet-stream'
+        attachments.append(db_insert_attachment(msg_data['id'], file_name, mime_type, file_bytes))
+
+    msg_data['attachments'] = attachments
+    msg_data['reactions'] = []
+    msg_data['my_reaction'] = None
+
+    room = chat_room_for_users(session['username'], to_user)
+    socketio.emit('new_message', msg_data, room=room)
+
+    if to_user in active_users:
+        recipient_sid = active_users[to_user]['sid']
+        socketio.emit(
+            'message_notification',
+            {
+                'from': session['username'],
+                'from_nickname': session['nickname'],
+                'message': message_text,
+            },
+            room=recipient_sid,
+        )
+
+    return jsonify({'success': True})
 
 # SocketIO события
 @socketio.on('connect')
@@ -428,6 +728,47 @@ def handle_send_message(data):
             'from_nickname': session['nickname'],
             'message': message
         }, room=recipient_sid)
+
+@socketio.on('add_reaction')
+def handle_add_reaction(data):
+    """Добавление/смена реакции на сообщение"""
+    current_user = session['username']
+    message_id = data.get('message_id')
+    emoji = (data.get('emoji') or '').strip()
+
+    if not message_id or not emoji:
+        return
+
+    if not USE_DB:
+        return
+
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO reactions (message_id, user_username, emoji)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (message_id, user_username)
+                DO UPDATE SET emoji=EXCLUDED.emoji
+                """,
+                (message_id, current_user, emoji),
+            )
+
+    pair = db_get_message_pair(message_id)
+    if not pair:
+        return
+
+    room = chat_room_for_users(pair['from_user'], pair['to_user'])
+    payload = db_get_reaction_payload(message_id, current_user)
+    socketio.emit(
+        'reaction_update',
+        {
+            'message_id': message_id,
+            'reactions': payload['reactions'],
+            'my_reaction': payload['my_reaction'],
+        },
+        room=room,
+    )
 
 def get_user_list():
     """Получение списка пользователей с онлайн статусом"""

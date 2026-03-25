@@ -3,3 +3,4 @@ __pycache__/
 users.json
 messages.json
 .env
+.vscode/

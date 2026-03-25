@@ -304,6 +304,119 @@
             text-align: center;
             margin-top: 10px;
         }
+
+        .reactions-bar {
+            display: flex;
+            gap: 6px;
+            margin-top: 8px;
+            flex-wrap: wrap;
+        }
+
+        .reaction-btn {
+            border: 1px solid rgba(0,0,0,0.1);
+            background: rgba(255,255,255,0.9);
+            border-radius: 999px;
+            padding: 6px 10px;
+            cursor: pointer;
+            transition: transform 0.05s ease, background 0.15s ease;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 14px;
+        }
+
+        .reaction-btn:active { transform: scale(0.98); }
+
+        .reaction-btn.active {
+            background: rgba(102,126,234,0.15);
+            border-color: rgba(102,126,234,0.6);
+        }
+
+        .attachment-img {
+            max-width: 260px;
+            max-height: 220px;
+            border-radius: 12px;
+            display: block;
+            margin: 4px 0;
+        }
+
+        .attachment-link {
+            display: inline-block;
+            padding: 8px 10px;
+            border-radius: 12px;
+            border: 1px solid rgba(0,0,0,0.12);
+            background: rgba(255,255,255,0.7);
+            color: #333;
+            text-decoration: none;
+            margin-top: 6px;
+        }
+
+        /* Настройки (модалка) */
+        .modal-backdrop {
+            position: fixed;
+            inset: 0;
+            background: rgba(0,0,0,0.5);
+            display: none;
+            z-index: 2000;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+
+        .modal-content {
+            width: 520px;
+            max-width: 100%;
+            background: white;
+            border-radius: 16px;
+            padding: 20px;
+            box-shadow: 0 12px 45px rgba(0,0,0,0.25);
+        }
+
+        .modal-title {
+            font-size: 20px;
+            margin-bottom: 12px;
+        }
+
+        .modal-row {
+            display: flex;
+            gap: 10px;
+            margin: 10px 0;
+            align-items: center;
+        }
+
+        .modal-content input[type="text"],
+        .modal-content input[type="password"] {
+            flex: 1;
+            padding: 12px;
+            border: 2px solid #e0e0e0;
+            border-radius: 10px;
+            font-size: 16px;
+        }
+
+        .modal-actions {
+            display: flex;
+            gap: 10px;
+            justify-content: flex-end;
+            margin-top: 14px;
+        }
+
+        .btn-secondary {
+            background: #e9ecef;
+            color: #333;
+            border: none;
+            border-radius: 10px;
+            padding: 10px 14px;
+            cursor: pointer;
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            border-radius: 10px;
+            padding: 10px 14px;
+            cursor: pointer;
+        }
     </style>
 </head>
 <body>
@@ -339,8 +452,11 @@
     <div id="chatContainer" class="chat-container flex">
         <div class="sidebar">
             <div class="user-info">
+                <img id="currentAvatar" src="" alt="avatar"
+                     style="width:56px;height:56px;border-radius:50%;object-fit:cover;display:block;margin-bottom:10px;background:#eef1f5;">
                 <h3 id="currentNickname"></h3>
                 <p id="currentUsername"></p>
+                <button class="btn-secondary" onclick="openSettings()" style="margin-top:10px;width:100%;">Настройки</button>
                 <button class="logout-btn" onclick="logout()">Выйти</button>
             </div>
             <div class="users-list" id="usersList"></div>
@@ -357,7 +473,48 @@
             <div class="message-input-area">
                 <input type="text" id="messageInput" placeholder="Введите сообщение..." 
                        onkeypress="if(event.key === 'Enter') sendMessage()">
+                <input type="file" id="fileInput" multiple style="flex:0 0 210px;font-size:14px;">
                 <button onclick="sendMessage()">Отправить</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Модальное окно настроек -->
+    <div id="settingsModal" class="modal-backdrop">
+        <div class="modal-content">
+            <div class="modal-title">Настройки</div>
+
+            <div class="modal-row">
+                <div style="width:120px;font-weight:600;">Никнейм</div>
+                <input type="text" id="settingsNickname" placeholder="Новый никнейм">
+            </div>
+            <div class="modal-actions">
+                <button class="btn-secondary" onclick="closeSettings()">Отмена</button>
+                <button class="btn-primary" onclick="saveNickname()">Сохранить</button>
+            </div>
+
+            <hr style="margin:16px 0;border:none;border-top:1px solid #eee;">
+
+            <div class="modal-row">
+                <div style="width:120px;font-weight:600;">Текущий пароль</div>
+                <input type="password" id="settingsCurrentPassword" placeholder="Текущий пароль">
+            </div>
+            <div class="modal-row">
+                <div style="width:120px;font-weight:600;">Новый пароль</div>
+                <input type="password" id="settingsNewPassword" placeholder="Новый пароль">
+            </div>
+            <div class="modal-actions">
+                <button class="btn-primary" onclick="changePassword()">Изменить пароль</button>
+            </div>
+
+            <hr style="margin:16px 0;border:none;border-top:1px solid #eee;">
+
+            <div class="modal-row">
+                <div style="width:120px;font-weight:600;">Аватарка</div>
+                <input type="file" id="avatarInput" accept="image/*">
+            </div>
+            <div class="modal-actions">
+                <button class="btn-primary" onclick="uploadAvatar()">Загрузить аватар</button>
             </div>
         </div>
     </div>
@@ -366,6 +523,7 @@
         let socket = null;
         let currentUser = null;
         let currentChatUser = null;
+        const REACTION_EMOJIS = ['👍', '❤️', '😂', '😮', '👎'];
         
         // Подключение WebSocket
         function initSocket() {
@@ -394,6 +552,10 @@
             socket.on('message_notification', (notification) => {
                 showNotification(`Новое сообщение от ${notification.from_nickname}: ${notification.message}`);
                 updateUsersListWithNotification(notification.from);
+            });
+
+            socket.on('reaction_update', (data) => {
+                updateReactionUI(data);
             });
         }
         
@@ -461,10 +623,15 @@
                 currentUser = data;
                 document.getElementById('currentNickname').textContent = data.nickname;
                 document.getElementById('currentUsername').textContent = `@${data.username}`;
+                if (data.avatar_url) {
+                    document.getElementById('currentAvatar').src = `${data.avatar_url}?t=${Date.now()}`;
+                }
                 
                 // Показываем чат
                 document.getElementById('authContainer').style.display = 'none';
                 document.getElementById('chatContainer').style.display = 'flex';
+                document.getElementById('messageInput').disabled = true;
+                document.getElementById('fileInput').disabled = true;
                 
                 // Инициализируем WebSocket
                 initSocket();
@@ -502,7 +669,10 @@
                 .map(user => `
                     <div class="user-item ${currentChatUser === user.username ? 'active' : ''}" 
                          onclick="startChat('${user.username}')">
-                        <div>
+                        <div style="display:flex;gap:10px;align-items:center;">
+                            <img src="${user.avatar_url}" 
+                                 style="width:34px;height:34px;border-radius:50%;object-fit:cover;background:#eef1f5;"
+                                 onerror="this.style.display='none'">
                             <strong>${user.nickname}</strong><br>
                             <small>@${user.username}</small>
                         </div>
@@ -521,6 +691,7 @@
             currentChatUser = username;
             document.getElementById('chatHeader').innerHTML = `Чат с ${username}`;
             document.getElementById('messageInput').disabled = false;
+            document.getElementById('fileInput').disabled = false;
             
             // Присоединяемся к комнате чата
             socket.emit('join_chat', {other_user: username});
@@ -548,41 +719,94 @@
         function addMessageToChat(message) {
             const messagesArea = document.getElementById('messagesArea');
             const isSent = message.from === currentUser.username;
-            
+
             const messageDiv = document.createElement('div');
             messageDiv.className = `message ${isSent ? 'sent' : 'received'}`;
-            
+            messageDiv.setAttribute('data-message-id', message.id);
+
+            const reactionsMap = {};
+            (message.reactions || []).forEach(r => {
+                reactionsMap[r.emoji] = r.count;
+            });
+            const myReaction = message.my_reaction || null;
+
+            const attachmentsHtml = (message.attachments || []).map(att => {
+                if (att.mime_type && att.mime_type.startsWith('image/')) {
+                    return `<img class="attachment-img" src="${att.url}" alt="${escapeHtml(att.file_name || 'image')}">`;
+                }
+                return `<a class="attachment-link" href="${att.url}" target="_blank">${escapeHtml(att.file_name || 'file')}</a>`;
+            }).join('');
+
+            const textHtml = message.message ? escapeHtml(message.message) : '';
+
+            const reactionsHtml = REACTION_EMOJIS
+                .map(e => {
+                    const count = reactionsMap[e] || 0;
+                    const active = myReaction === e ? 'active' : '';
+                    return `
+                        <button class="reaction-btn ${active}" data-emoji="${e}" onclick="sendReaction(${message.id}, '${e}')">
+                            <span>${e}</span>
+                            <span class="count">${count}</span>
+                        </button>
+                    `;
+                })
+                .join('');
+
             messageDiv.innerHTML = `
                 <div class="message-bubble">
-                    ${escapeHtml(message.message)}
+                    ${attachmentsHtml ? attachmentsHtml : ''}
+                    ${textHtml ? textHtml : ''}
                 </div>
                 <div class="message-info">
                     ${message.from_nickname} • ${message.timestamp}
                 </div>
+                <div class="reactions-bar">
+                    ${reactionsHtml}
+                </div>
             `;
-            
+
             messagesArea.appendChild(messageDiv);
             messagesArea.scrollTop = messagesArea.scrollHeight;
         }
         
         // Отправка сообщения
-        function sendMessage() {
+        async function sendMessage() {
             if (!currentChatUser) {
                 alert('Выберите собеседника');
                 return;
             }
-            
+
             const input = document.getElementById('messageInput');
+            const fileInput = document.getElementById('fileInput');
             const message = input.value.trim();
-            
-            if (!message) return;
-            
-            socket.emit('send_message', {
-                to: currentChatUser,
-                message: message
+            const files = fileInput.files;
+            const hasFiles = files && files.length > 0;
+
+            if (!message && !hasFiles) return;
+
+            const formData = new FormData();
+            formData.append('to', currentChatUser);
+            formData.append('message', message);
+
+            if (hasFiles) {
+                for (const file of files) {
+                    formData.append('files', file);
+                }
+            }
+
+            const response = await fetch('/api/send_message', {
+                method: 'POST',
+                body: formData
             });
-            
+
+            const data = await response.json();
+            if (!data.success) {
+                alert(data.message || 'Ошибка отправки сообщения');
+                return;
+            }
+
             input.value = '';
+            fileInput.value = '';
         }
         
         // Показать уведомление
@@ -603,6 +827,100 @@
             div.textContent = text;
             return div.innerHTML;
         }
+
+        // Реакции
+        function sendReaction(messageId, emoji) {
+            if (!socket) return;
+            socket.emit('add_reaction', {message_id: messageId, emoji: emoji});
+        }
+
+        function updateReactionUI(data) {
+            const messageDiv = document.querySelector(`[data-message-id="${data.message_id}"]`);
+            if (!messageDiv) return;
+
+            const reactionsMap = {};
+            (data.reactions || []).forEach(r => {
+                reactionsMap[r.emoji] = r.count;
+            });
+            const myReaction = data.my_reaction || null;
+
+            REACTION_EMOJIS.forEach(e => {
+                const btn = messageDiv.querySelector(`.reaction-btn[data-emoji="${e}"]`);
+                if (!btn) return;
+                const countEl = btn.querySelector('.count');
+                if (countEl) countEl.textContent = (reactionsMap[e] || 0);
+
+                if (myReaction === e) btn.classList.add('active');
+                else btn.classList.remove('active');
+            });
+        }
+
+        // Настройки
+        function openSettings() {
+            document.getElementById('settingsNickname').value = currentUser?.nickname || '';
+            document.getElementById('settingsCurrentPassword').value = '';
+            document.getElementById('settingsNewPassword').value = '';
+            document.getElementById('avatarInput').value = '';
+            document.getElementById('settingsModal').style.display = 'flex';
+        }
+
+        function closeSettings() {
+            document.getElementById('settingsModal').style.display = 'none';
+        }
+
+        async function saveNickname() {
+            const nickname = document.getElementById('settingsNickname').value.trim();
+            if (!nickname) return alert('Никнейм не может быть пустым');
+
+            const response = await fetch('/api/update_nickname', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({nickname})
+            });
+            const data = await response.json();
+            if (!data.success) return alert(data.message || 'Ошибка');
+
+            currentUser.nickname = nickname;
+            document.getElementById('currentNickname').textContent = nickname;
+            closeSettings();
+            loadUsers();
+        }
+
+        async function changePassword() {
+            const current_password = document.getElementById('settingsCurrentPassword').value;
+            const new_password = document.getElementById('settingsNewPassword').value;
+
+            const response = await fetch('/api/update_password', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({current_password, new_password})
+            });
+            const data = await response.json();
+            if (!data.success) return alert(data.message || 'Ошибка');
+
+            alert('Пароль изменен');
+            closeSettings();
+        }
+
+        async function uploadAvatar() {
+            const files = document.getElementById('avatarInput').files;
+            if (!files || files.length === 0) return alert('Выберите файл аватара');
+
+            const fd = new FormData();
+            fd.append('avatar', files[0]);
+
+            const response = await fetch('/api/update_avatar', {
+                method: 'POST',
+                body: fd
+            });
+            const data = await response.json();
+            if (!data.success) return alert(data.message || 'Ошибка');
+
+            const avatarEl = document.getElementById('currentAvatar');
+            avatarEl.src = `/api/avatar/${currentUser.username}?t=${Date.now()}`;
+            document.getElementById('avatarInput').value = '';
+            closeSettings();
+        }
         
         // Проверка авторизации при загрузке
         async function checkAuth() {
@@ -613,8 +931,13 @@
                 currentUser = data;
                 document.getElementById('currentNickname').textContent = data.nickname;
                 document.getElementById('currentUsername').textContent = `@${data.username}`;
+                if (data.avatar_url) {
+                    document.getElementById('currentAvatar').src = `${data.avatar_url}?t=${Date.now()}`;
+                }
                 document.getElementById('authContainer').style.display = 'none';
                 document.getElementById('chatContainer').style.display = 'flex';
+                document.getElementById('messageInput').disabled = true;
+                document.getElementById('fileInput').disabled = true;
                 initSocket();
                 loadUsers();
             }
