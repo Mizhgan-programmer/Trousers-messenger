@@ -1,7 +1,7 @@
 from flask import Flask, render_template, request, jsonify, session, send_file, abort
 from flask_socketio import SocketIO, emit, join_room, leave_room
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from functools import wraps
 import hashlib
 import socket
@@ -13,7 +13,7 @@ import traceback
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'dev-secret-key-change-me')
-app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50 MB
+app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024
 app.config['PERMANENT_SESSION_LIFETIME'] = 604800
 app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 3600
 
@@ -128,14 +128,32 @@ def db_insert_attachment(message_id, file_name, mime_type, data_bytes):
             """, (message_id, file_name, mime_type, psycopg2.Binary(data_bytes)))
             return cur.fetchone()[0]
 
+# ========== АВТОУДАЛЕНИЕ СТАРЫХ СООБЩЕНИЙ (2 часа) ==========
+def auto_delete_old_messages():
+    """Удаляет сообщения старше 2 часов"""
+    try:
+        with db_connect() as conn:
+            with conn.cursor() as cur:
+                cutoff_time = datetime.now() - timedelta(hours=2)
+                cur.execute("DELETE FROM messages WHERE timestamp < %s", (cutoff_time,))
+                deleted = cur.rowcount
+                conn.commit()
+                if deleted > 0:
+                    print(f"[AUTO-DELETE] Удалено {deleted} сообщений (старше 2 часов)")
+    except Exception as e:
+        print(f"[AUTO-DELETE ERROR] {e}")
+
 def db_get_history(current_user, other_user):
+    auto_delete_old_messages()  # Автоудаление при загрузке истории
+    
     with db_connect() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute("""
                 SELECT id, from_user, from_nickname, to_user, message, 
                        to_char(timestamp, 'YYYY-MM-DD HH24:MI:SS') AS timestamp
                 FROM messages
-                WHERE ((from_user=%s AND to_user=%s AND deleted_for_sender=FALSE) OR (from_user=%s AND to_user=%s AND deleted_for_recipient=FALSE))
+                WHERE ((from_user=%s AND to_user=%s AND deleted_for_sender=FALSE) 
+                    OR (from_user=%s AND to_user=%s AND deleted_for_recipient=FALSE))
                 ORDER BY id ASC
             """, (current_user, other_user, other_user, current_user))
             rows = cur.fetchall()
@@ -314,8 +332,32 @@ def api_attachment(attachment_id):
 def api_avatar(username):
     row = db_get_avatar(username)
     if not row or not row.get('avatar_data'):
-        abort(404)
-    return send_file(BytesIO(row['avatar_data']), mimetype=row.get('avatar_mime', 'image/png'), as_attachment=False)
+        # Возвращаем заглушку с инициалами
+        return send_file(BytesIO(generate_default_avatar(username)), mimetype='image/png')
+    return send_file(BytesIO(row['avatar_data']), mimetype=row.get('avatar_mime', 'image/png'))
+
+def generate_default_avatar(username):
+    """Генерирует простую аватарку с инициалами"""
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+        img = Image.new('RGB', (100, 100), color=(102, 126, 234))
+        draw = ImageDraw.Draw(img)
+        letter = username[0].upper() if username else '?'
+        try:
+            font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 40)
+        except:
+            font = ImageFont.load_default()
+        bbox = draw.textbbox((0, 0), letter, font=font)
+        w = bbox[2] - bbox[0]
+        h = bbox[3] - bbox[1]
+        draw.text(((100 - w) // 2, (100 - h) // 2 - 10), letter, fill='white', font=font)
+        buf = BytesIO()
+        img.save(buf, format='PNG')
+        buf.seek(0)
+        return buf.getvalue()
+    except:
+        # Если PIL нет, возвращаем пустой байт
+        return b''
 
 @app.route('/api/update_nickname', methods=['POST'])
 @login_required
@@ -366,13 +408,18 @@ def api_send_message():
         if not message_text and not files:
             return jsonify({'success': False, 'message': 'Сообщение или файлы обязательны'}), 400
 
-        msg_data = db_insert_message(session['username'], session['nickname'], to_user, message_text, datetime.now())
+        recipient = db_get_user(to_user)
+        if not recipient:
+            return jsonify({'success': False, 'message': 'Получатель не найден'}), 404
+
+        msg_data = db_insert_message(session['username'], session['nickname'], to_user, message_text or '[Вложение]', datetime.now())
 
         attachments = []
         for f in files:
             if f and f.filename:
-                aid = db_insert_attachment(msg_data['id'], secure_filename(f.filename), f.mimetype or 'application/octet-stream', f.read())
-                attachments.append({'id': aid, 'url': f"/api/attachment/{aid}", 'file_name': f.filename, 'mime_type': f.mimetype})
+                filename = secure_filename(f.filename)
+                aid = db_insert_attachment(msg_data['id'], filename, f.mimetype or 'application/octet-stream', f.read())
+                attachments.append({'id': aid, 'url': f"/api/attachment/{aid}", 'file_name': filename, 'mime_type': f.mimetype})
 
         msg_data['attachments'] = attachments
         msg_data['reactions'] = []
@@ -382,7 +429,7 @@ def api_send_message():
         socketio.emit('new_message', msg_data, room=room)
 
         if to_user in active_users:
-            socketio.emit('message_notification', {'from': session['username'], 'from_nickname': session['nickname'], 'message': message_text},
+            socketio.emit('message_notification', {'from': session['username'], 'from_nickname': session['nickname'], 'message': message_text[:50]},
                          room=active_users[to_user]['sid'])
         return jsonify({'success': True})
     except Exception as e:
