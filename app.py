@@ -332,32 +332,18 @@ def api_attachment(attachment_id):
 def api_avatar(username):
     row = db_get_avatar(username)
     if not row or not row.get('avatar_data'):
-        # Возвращаем заглушку с инициалами
-        return send_file(BytesIO(generate_default_avatar(username)), mimetype='image/png')
+        # Возвращаем SVG-заглушку с инициалами (без Pillow!)
+        return send_file(BytesIO(generate_svg_avatar(username)), mimetype='image/svg+xml')
     return send_file(BytesIO(row['avatar_data']), mimetype=row.get('avatar_mime', 'image/png'))
 
-def generate_default_avatar(username):
-    """Генерирует простую аватарку с инициалами"""
-    try:
-        from PIL import Image, ImageDraw, ImageFont
-        img = Image.new('RGB', (100, 100), color=(102, 126, 234))
-        draw = ImageDraw.Draw(img)
-        letter = username[0].upper() if username else '?'
-        try:
-            font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 40)
-        except:
-            font = ImageFont.load_default()
-        bbox = draw.textbbox((0, 0), letter, font=font)
-        w = bbox[2] - bbox[0]
-        h = bbox[3] - bbox[1]
-        draw.text(((100 - w) // 2, (100 - h) // 2 - 10), letter, fill='white', font=font)
-        buf = BytesIO()
-        img.save(buf, format='PNG')
-        buf.seek(0)
-        return buf.getvalue()
-    except:
-        # Если PIL нет, возвращаем пустой байт
-        return b''
+def generate_svg_avatar(username):
+    """Генерирует SVG-аватарку с инициалами (не требует Pillow)"""
+    letter = username[0].upper() if username else '?'
+    svg = f'''<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100" viewBox="0 0 100 100">
+        <rect width="100" height="100" rx="50" fill="#667eea"/>
+        <text x="50" y="65" text-anchor="middle" fill="white" font-size="40" font-family="Arial, sans-serif" font-weight="bold">{letter}</text>
+    </svg>'''
+    return svg.encode('utf-8')
 
 @app.route('/api/update_nickname', methods=['POST'])
 @login_required
